@@ -137,7 +137,7 @@ jobs:
                       "attributes": {
                           "version": version,
                           "key-id": key_id,
-                          "protocols": ["6.0"]
+                          "protocols": ["5.0"]
                       }
                   }
               })
