@@ -39,6 +39,8 @@ signs:
   - artifacts: checksum
     args:
       - "--batch"
+      - "--faked-system-time"
+      - "{{ .Env.GPG_SIGN_TIME }}"
       - "--local-user"
       - "{{ .Env.GPG_FINGERPRINT }}"
       - "--digest-algo"
