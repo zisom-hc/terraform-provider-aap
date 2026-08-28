@@ -29,15 +29,179 @@ jobs:
         uses: crazy-max/ghaction-import-gpg@v6
         id: import_gpg
         with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.PASSPHRASE }}
+          gpg_private_key: ${{ secrets.TFE_PROVIDER_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean
+          args: release --clean --skip=publish
         env:
-          # GitHub sets the GITHUB_TOKEN secret automatically.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+          GPG_SIGN_TIME: "1787874029"
+
+      - name: Upload to HCP Terraform
+        env:
+          TFE_TOKEN: ${{ secrets.TFE_TOKEN }}
+          TFE_HOST: ${{ vars.TFE_HOST }}
+          TFE_ORGANIZATION: ${{ vars.TFE_ORGANIZATION }}
+          TFE_PROVIDER_NAMESPACE: ${{ vars.TFE_PROVIDER_NAMESPACE }}
+          VERSION: ${{ github.ref_name }}
+          GPG_KEY_ID: ${{ secrets.TFE_PROVIDER_GPG_KEY_ID }}
+        run: |
+          python3 << 'PYTHON_SCRIPT'
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import glob
+
+          host = os.environ.get("TFE_HOST", "app.terraform.io").rstrip("/")
+          token = os.environ["TFE_TOKEN"]
+          org = os.environ.get("TFE_ORGANIZATION", "cpolansky-poc-fiserv")
+          namespace = os.environ.get("TFE_PROVIDER_NAMESPACE", org)
+          provider = "aap"
+          version = os.environ["VERSION"].lstrip("v")
+          key_id = os.environ["GPG_KEY_ID"]
+
+          def api(*parts):
+              path = "/".join(urllib.parse.quote(part.strip("/"), safe="") for part in parts)
+              return f"https://{host}/api/v2/{path}"
+
+          def req(method, url, body=None, ok=(200, 201, 204)):
+              data = None if body is None else json.dumps(body).encode()
+              request = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers={"Authorization": f"Bearer {token}", "Content-Type": "application/vnd.api+json"},
+                  method=method,
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      payload = response.read()
+                      if response.status not in ok:
+                          raise RuntimeError(f"{method} {url} returned HTTP {response.status}")
+                      return json.loads(payload.decode()) if payload else None
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode(errors="replace")
+                  raise RuntimeError(f"{method} {url} returned HTTP {exc.code}: {detail}") from exc
+
+          def upload(url, path):
+              with open(path, "rb") as handle:
+                  data = handle.read()
+              request = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers={"Content-Type": "application/octet-stream"},
+                  method="PUT",
+              )
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  if response.status not in (200, 201, 204):
+                      raise RuntimeError(f"upload returned HTTP {response.status}")
+
+          # Create provider if needed
+          registry_name = "private"
+          provider_url = api("organizations", org, "registry-providers", registry_name, namespace, provider)
+          try:
+              req("GET", provider_url)
+              print(f"Provider {namespace}/{provider} exists")
+          except RuntimeError as exc:
+              if "HTTP 404" not in str(exc):
+                  raise
+              print(f"Creating provider {namespace}/{provider}")
+              req("POST", api("organizations", org, "registry-providers"), {
+                  "data": {
+                      "type": "registry-providers",
+                      "attributes": {
+                          "name": provider,
+                          "namespace": namespace,
+                          "registry-name": registry_name
+                      }
+                  }
+              })
+
+          # Create version
+          version_url = api("organizations", org, "registry-providers", registry_name, namespace, provider, "versions", version)
+          try:
+              version_response = req("GET", version_url)
+              print(f"Version {version} exists")
+          except RuntimeError as exc:
+              if "HTTP 404" not in str(exc):
+                  raise
+              print(f"Creating version {version}")
+              version_response = req("POST", api("organizations", org, "registry-providers", registry_name, namespace, provider, "versions"), {
+                  "data": {
+                      "type": "registry-provider-versions",
+                      "attributes": {
+                          "version": version,
+                          "key-id": key_id,
+                          "protocols": ["5.0"]
+                      }
+                  }
+              })
+
+          # Upload checksums and signature
+          links = (version_response.get("data") or {}).get("links") or {}
+          shasums_file = f"dist/terraform-provider-{provider}_{version}_SHA256SUMS"
+          sig_file = f"{shasums_file}.sig"
+
+          if links.get("shasums-upload") and os.path.exists(shasums_file):
+              print(f"Uploading {shasums_file}")
+              upload(links["shasums-upload"], shasums_file)
+
+          if links.get("shasums-sig-upload") and os.path.exists(sig_file):
+              print(f"Uploading {sig_file}")
+              upload(links["shasums-sig-upload"], sig_file)
+
+          # Upload platforms
+          for zip_file in glob.glob(f"dist/terraform-provider-{provider}_{version}_*.zip"):
+              filename = os.path.basename(zip_file)
+              # Skip manifest zip if present
+              parts = filename.replace(f"terraform-provider-{provider}_{version}_", "").replace(".zip", "").split("_")
+              if len(parts) != 2:
+                  continue
+              goos, goarch = parts
+
+              # Get shasum
+              shasum = None
+              with open(shasums_file) as f:
+                  for line in f:
+                      if filename in line:
+                          shasum = line.split()[0]
+                          break
+              if not shasum:
+                  print(f"WARNING: no shasum found for {filename}, skipping")
+                  continue
+
+              # Create platform
+              platform_url = api("organizations", org, "registry-providers", registry_name, namespace, provider, "versions", version, "platforms", goos, goarch)
+              try:
+                  platform_response = req("GET", platform_url)
+                  print(f"Platform {goos}/{goarch} exists")
+              except RuntimeError as exc:
+                  if "HTTP 404" not in str(exc):
+                      raise
+                  print(f"Creating platform {goos}/{goarch}")
+                  platform_response = req("POST", api("organizations", org, "registry-providers", registry_name, namespace, provider, "versions", version, "platforms"), {
+                      "data": {
+                          "type": "registry-provider-version-platforms",
+                          "attributes": {
+                              "os": goos,
+                              "arch": goarch,
+                              "shasum": shasum,
+                              "filename": filename
+                          }
+                      }
+                  })
+
+              # Upload binary
+              platform_links = (platform_response.get("data") or {}).get("links") or {}
+              if platform_links.get("provider-binary-upload"):
+                  print(f"Uploading {filename}")
+                  upload(platform_links["provider-binary-upload"], zip_file)
+
+          print(f"✅ Successfully published {namespace}/{provider} v{version}")
+          PYTHON_SCRIPT
