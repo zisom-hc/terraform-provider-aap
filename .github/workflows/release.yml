@@ -61,7 +61,7 @@ jobs:
 
           host = os.environ.get("TFE_HOST", "app.terraform.io").rstrip("/")
           token = os.environ["TFE_TOKEN"]
-          org = os.environ.get("TFE_ORGANIZATION", "cpolansky-poc-fiserv")
+          org = os.environ["TFE_ORGANIZATION"]
           namespace = os.environ.get("TFE_PROVIDER_NAMESPACE", org)
           provider = "aap"
           version = os.environ["VERSION"].lstrip("v")

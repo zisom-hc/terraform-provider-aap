@@ -23,7 +23,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "app.terraform.io/cpolansky-poc-fiserv/aap",
+		Address: "registry.terraform.io/ansible/aap",
 		Debug:   debug,
 	}
 
