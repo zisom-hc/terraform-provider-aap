@@ -42,6 +42,15 @@ jobs:
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
           GPG_SIGN_TIME: "1787874029"
 
+      - name: Keep signed dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/*.zip
+            dist/*_SHA256SUMS
+            dist/*_SHA256SUMS.sig
+
       - name: Upload to HCP Terraform
         env:
           TFE_TOKEN: ${{ secrets.TFE_TOKEN }}
