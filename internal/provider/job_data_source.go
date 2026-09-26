@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"strconv"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
-	"github.com/hashicorp/terraform-plugin-framework/path"
+	tfpath "github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -148,8 +149,8 @@ func (d *JobDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 func (d *JobDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
 	return []datasource.ConfigValidator{
 		datasourcevalidator.AtLeastOneOf(
-			path.MatchRoot("id"),
-			path.MatchRoot("job_template_id"),
+			tfpath.MatchRoot("id"),
+			tfpath.MatchRoot("job_template_id"),
 		),
 	}
 }
@@ -186,7 +187,7 @@ func (d *JobDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 	data.Finished = optionalString(job.Finished)
 	data.Elapsed = optionalFloat(job.Elapsed)
 	data.JobExplanation = types.StringValue(job.JobExplanation)
-	data.Stdout = d.readStdout(job.URL, &resp.Diagnostics)
+	data.Stdout = d.readStdout(job.ID, &resp.Diagnostics)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -197,7 +198,8 @@ func (d *JobDataSource) findJob(data JobDataSourceModel) ([]byte, diag.Diagnosti
 	var diags diag.Diagnostics
 
 	if IsValueProvidedOrPromised(data.ID) {
-		body, d2, status := d.client.GetWithStatus(fmt.Sprintf("/jobs/%d/", data.ID.ValueInt64()), nil)
+		body, d2, status := d.client.GetWithStatus(
+			path.Join(d.client.getAPIEndpoint(), "jobs", strconv.FormatInt(data.ID.ValueInt64(), 10)), nil)
 		diags.Append(d2...)
 		if diags.HasError() {
 			return nil, diags
@@ -219,7 +221,7 @@ func (d *JobDataSource) findJob(data JobDataSourceModel) ([]byte, diag.Diagnosti
 		params["limit"] = data.Limit.ValueString()
 	}
 
-	body, d2, status := d.client.GetWithStatus("/jobs/", params)
+	body, d2, status := d.client.GetWithStatus(path.Join(d.client.getAPIEndpoint(), "jobs"), params)
 	diags.Append(d2...)
 	if diags.HasError() {
 		return nil, diags
@@ -247,12 +249,14 @@ func (d *JobDataSource) findJob(data JobDataSourceModel) ([]byte, diag.Diagnosti
 
 // readStdout fetches the job's output. AAP serves it separately from the job
 // payload, and returns 404 while a job has not produced output yet.
-func (d *JobDataSource) readStdout(jobURL string, diags *diag.Diagnostics) types.String {
-	if jobURL == "" {
+func (d *JobDataSource) readStdout(jobID int64, diags *diag.Diagnostics) types.String {
+	if jobID == 0 {
 		return types.StringNull()
 	}
 
-	body, d2, status := d.client.GetWithStatus(jobURL+"stdout/", map[string]string{"format": "json"})
+	body, d2, status := d.client.GetWithStatus(
+		path.Join(d.client.getAPIEndpoint(), "jobs", strconv.FormatInt(jobID, 10), "stdout"),
+		map[string]string{"format": "json"})
 	diags.Append(d2...)
 	if diags.HasError() {
 		return types.StringNull()
@@ -266,7 +270,7 @@ func (d *JobDataSource) readStdout(jobURL string, diags *diag.Diagnostics) types
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		diags.AddWarning("Could not parse job output",
-			fmt.Sprintf("Could not parse the stdout of %s: %s", jobURL, err.Error()))
+			fmt.Sprintf("Could not parse the stdout of job %d: %s", jobID, err.Error()))
 		return types.StringNull()
 	}
 	return types.StringValue(out.Content)
